@@ -43,6 +43,8 @@ int make_client_sockaddr(struct sockaddr_in *addr, const char *hostname,
  */
 int get_port_number(int sockfd);
 
+std::string get_IP(int sockfd);
+
 /**
  * Send a sequence of bytes over a TCP socket.
  *
@@ -54,5 +56,9 @@ int get_port_number(int sockfd);
  *   The size of the sequence if sending works; otherwise, return -1.
  */
 int send_data(int sockfd, std::string_view bytes);
+
+int get_client_port_number(struct sockaddr_in *their_addr);
+
+std::string get_client_IP(struct sockaddr_in *their_addr);
 
 #endif // NETWORK_UTILS_H

@@ -4,6 +4,7 @@
 #include <string.h>     // memcpy()
 #include <sys/socket.h> // getsockname(), send()
 #include <unistd.h>     // close()
+#include <string>
 
 int make_server_sockaddr(struct sockaddr_in *addr, int port) {
     // (1) This is an Internet socket
@@ -43,6 +44,16 @@ int get_port_number(int sockfd) {
     return ntohs(addr.sin_port);
 }
 
+std::string get_IP(int sockfd) {
+    struct sockaddr_in addr;
+    socklen_t length = sizeof(addr);
+    if (getsockname(sockfd, (sockaddr *)&addr, &length) == -1) {
+        perror("Error getting port of socket");
+        return "-1";
+    }
+    return std::string(inet_ntoa(addr.sin_addr));
+}
+
 int send_data(int sockfd, std::string_view bytes) {
     size_t sent = 0;
     do {
@@ -54,4 +65,12 @@ int send_data(int sockfd, std::string_view bytes) {
         sent += n;
     } while (sent < bytes.size());
     return 0;
+}
+
+int get_client_port_number(struct sockaddr_in *their_addr){
+    return ntohs(their_addr->sin_port);
+}
+
+std::string get_client_IP(struct sockaddr_in *their_addr){
+    return std::string(inet_ntoa(their_addr->sin_addr));
 }
