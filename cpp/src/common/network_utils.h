@@ -5,6 +5,10 @@
 #include <netdb.h>      // gethostbyname(), struct hostent
 #include <netinet/in.h> // struct sockaddr_in
 #include <string_view>
+#include <string>
+#include <sstream>
+
+const unsigned int MAX_MESSAGE_SIZE = 255; 
 
 /**
  * Make a server sockaddr given a port.
@@ -42,6 +46,12 @@ int make_client_sockaddr(struct sockaddr_in *addr, const char *hostname,
  *   The port number of the socket, or -1 on failure.
  */
 int get_port_number(int sockfd);
+
+std::string get_first_line(const std::string& request);
+
+size_t extract_content_length(const std::string& headers);
+
+std::string parse_request_line(const std::string &line);
 
 std::string get_IP(int sockfd);
 

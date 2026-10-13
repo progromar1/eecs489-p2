@@ -44,6 +44,48 @@ int get_port_number(int sockfd) {
     return ntohs(addr.sin_port);
 }
 
+std::string get_first_line(const std::string& request) {
+    size_t pos = request.find("\r\n");
+    if (pos == std::string::npos) {
+        pos = request.find('\n');
+    }
+    if (pos == std::string::npos) {
+        return request;
+    }
+    return request.substr(0, pos);
+}
+
+// 3. Helper: Extract Content-Length case-insensitively
+size_t extract_content_length(const std::string& headers) {
+    std::stringstream ss(headers);
+    std::string line;
+
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        std::string lower_line = line;
+        std::transform(lower_line.begin(), lower_line.end(), lower_line.begin(), ::tolower);
+
+        if (lower_line.rfind("content-length:", 0) == 0) {
+            size_t colon_pos = line.find(':');
+            if (colon_pos != std::string::npos) {
+                std::string val_str = line.substr(colon_pos + 1);
+                val_str.erase(0, val_str.find_first_not_of(" \t"));
+                val_str.erase(val_str.find_last_not_of(" \t") + 1);
+
+                try {
+                    return std::stoul(val_str);
+                } catch (...) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 std::string get_IP(int sockfd) {
     struct sockaddr_in addr;
     socklen_t length = sizeof(addr);
@@ -52,6 +94,24 @@ std::string get_IP(int sockfd) {
         return "-1";
     }
     return std::string(inet_ntoa(addr.sin_addr));
+}
+
+std::string parse_request_line(const std::string &line){
+   std::istringstream iss(line);
+   std::string target, filler;
+   iss >> filler >> target;
+
+   size_t videoFolderPos = target.find("/video/");
+   if (videoFolderPos != std::string::npos) {
+      return target.substr(0, videoFolderPos + 1); // Returns up to "/videos/michigan-hype-video/"
+   }
+
+   // 3. Otherwise, if it is the .mpd path, strip off the file name at the final slash
+   size_t lastSlashPos = target.find_last_of('/');
+   if (lastSlashPos != std::string::npos) {
+      return target.substr(0, lastSlashPos + 1); // Returns up to "/videos/michigan-hype-video/"
+   }
+   return target;
 }
 
 int send_data(int sockfd, std::string_view bytes) {
