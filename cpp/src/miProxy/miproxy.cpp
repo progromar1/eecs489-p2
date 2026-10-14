@@ -244,9 +244,6 @@ void connect_to_videoserver(const char* vidServerPort, const char* validServerHo
    else{
       std::cout << "connect_to_videoserver: Could not find browser FD\n";
    }
-
-   std::cout << "Connected to Video Server !\n";
-   
 }
 
 void handle_client_activity(fd_set &readfds, double alpha){
@@ -287,7 +284,6 @@ void handle_client_activity(fd_set &readfds, double alpha){
                   if (header_end_pos != std::string::npos) {
                      state.head_parsed = true;
 
-                     // Extract header section and body start position
                      std::string headers = state.readBuffer.substr(0, header_end_pos);
                      // skips the delimeter and marks the start of the body
                      size_t body = header_end_pos + 4; 
@@ -309,14 +305,53 @@ void handle_client_activity(fd_set &readfds, double alpha){
                         if (remainder_recv > 0) {
                            state.readBuffer.append(remaining_body.data(), remainder_recv);
                         }
-                        
+                     }
+
+                     //Extract uuid and other information from HTTP packet
+                     std::istringstream stream(headers);
+                     std::string line;
+                     std::getline(stream, line); 
+
+                     while (std::getline(stream, line) && line != "\r") {
+                        // Strip trailing carriage return if present
+                        if (!line.empty() && line.back() == '\r') {
+                           line.pop_back();
+                        }
+
+                        size_t colon = line.find(':');
+                        if (colon == std::string::npos) continue;
+
+                        // Extract key and lowercase it for reliable comparison
+                        std::string key = line.substr(0, colon);
+                        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+                        // Extract raw value and trim leading space safely
+                        std::string value = line.substr(colon + 1);
+                        size_t first_char = value.find_first_not_of(" \t");
+                        if (first_char != std::string::npos) {
+                           value = value.substr(first_char);
+                        }
+
+                        // Map keys directly to your target variables
+                        if (key == "x-489-uuid"){
+                           uuid = value;
+                        }
+                        else if (key == "x-fragment-size"){
+                           size_str = value;
+                        }
+                        else if (key == "x-timestamp-start"){
+                           start_str = value;
+                        }
+                        else if (key == "x-timestamp-end"){
+                           end_str = value;
+                        }
                      }
 
                      if (requestType.find("GET") != std::string::npos) {
                         if (requestType.find(".mpd") != std::string::npos) {
                            // Extract the path
                            std::string vidPath = parse_request_line(requestType);
-                           //spdlog::info("Manifest requested by {} forwarded to {}:{} for {}", client_uuid, get_IP(state.connectedTo), get_port_number(state.connectedTo), chunkname); 
+                           spdlog::info("Manifest requested by {} forwarded to {}:{} for {}", uuid, get_IP(state.connectedTo), get_port_number(state.connectedTo), extractChunkname(requestType)); 
 
                            // First-ever request for this video, fetch vid.mpd for the proxy's own use
                            if (availBitrates.find(vidPath) == availBitrates.end()) {
@@ -325,71 +360,41 @@ void handle_client_activity(fd_set &readfds, double alpha){
                               // Block until headers + Content-Length bytes have arrived
                               std::string resp;
                               char buf[4096];
-                              size_t hdrEnd = std::string::npos, len = 0;
-                              while (hdrEnd == std::string::npos || resp.size() < hdrEnd + 4 + len) {
+                              size_t headerEnd = std::string::npos;
+                              size_t len = 0;
+                              while (headerEnd == std::string::npos || resp.size() < headerEnd + 4 + len) {
                                  ssize_t n = recv(state.connectedTo, buf, sizeof(buf), 0);
                                  if (n <= 0) break;
                                  resp.append(buf, n);
-                                 if (hdrEnd == std::string::npos && (hdrEnd = resp.find("\r\n\r\n")) != std::string::npos)
-                                    len = extract_content_length(resp.substr(0, hdrEnd));
+                                 if (headerEnd == std::string::npos && (headerEnd = resp.find("\r\n\r\n")) != std::string::npos)
+                                    len = extract_content_length(resp.substr(0, headerEnd));
                               }
 
-                              // Parse the video bitrates only (skips audio)
-                              if (hdrEnd != std::string::npos) {
+                              if (headerEnd != std::string::npos) {
                                  pugi::xml_document doc;
-                                 if (doc.load_string(resp.substr(hdrEnd + 4).c_str())) {
+                                 if (doc.load_string(resp.substr(headerEnd + 4).c_str())) {
                                     pugi::xpath_node_set reps = doc.select_nodes(
                                        "//AdaptationSet[@contentType='video' or starts-with(@mimeType, 'video')]/Representation");
 
                                     std::vector<int> rates;
-                                    for (pugi::xpath_node xn : reps)
+                                    for (pugi::xpath_node xn : reps){
                                        rates.push_back(xn.node().attribute("bandwidth").as_int());
+                                    }
                                     availBitrates[vidPath] = rates;
                                  }
                               }
                            }
 
                            size_t p = state.readBuffer.find("vid.mpd");
-                           if (p != std::string::npos) state.readBuffer.replace(p, 7, "vid-no-list.mpd");
+                           if (p != std::string::npos){
+                              state.readBuffer.replace(p, 7, "vid-no-list.mpd");
+                           }
                         }
                         else if (requestType.find(".m4s") != std::string::npos) {
                            std::string vidPath = parse_request_line(requestType);
 
                            // 1. Process headers line-by-line using a stream wrapper
                            if (vidPath.find("audio") == std::string::npos){
-                              std::istringstream stream(state.readBuffer);
-                              std::string line;
-                              
-                              // Skip the initial POST / request status line
-                              std::getline(stream, line); 
-                              
-                              while (std::getline(stream, line) && line != "\r") {
-                                 // Strip trailing carriage return if present
-                                 if (!line.empty() && line.back() == '\r') {
-                                    line.pop_back();
-                                 }
-
-                                 size_t colon = line.find(':');
-                                 if (colon == std::string::npos) continue;
-
-                                 // Extract key and lowercase it for reliable comparison
-                                 std::string key = line.substr(0, colon);
-                                 std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-
-                                 // Extract raw value and trim leading space safely
-                                 std::string value = line.substr(colon + 1);
-                                 size_t first_char = value.find_first_not_of(" \t");
-                                 if (first_char != std::string::npos) {
-                                    value = value.substr(first_char);
-                                 }
-
-                                 // Map keys directly to your target variables
-                                 if (key == "x-489-uuid"){
-                                    uuid = value;
-                                 }
-                              }
-                              
-
                               double minThroughput = throughputs[uuid] / 1.5;
                               int lowestBitRate = *(std::min_element(availBitrates[vidPath].begin(),availBitrates[vidPath].end()));
                               int goingBitRate = lowestBitRate;
@@ -408,68 +413,20 @@ void handle_client_activity(fd_set &readfds, double alpha){
                               if (reqLinePos != std::string::npos) {
                                  state.readBuffer.replace(reqLinePos, oldFilePattern.size(), newFilePattern);
                               }
-                              
+                              spdlog::info("Segment requested by {} forwarded to {}:{} as {} at bitrate {} Kbps", uuid, state.connectedTo, get_port_number(state.connectedTo), extractChunkname(requestType), goingBitRate);
                            }
                         }
                      } 
                      else if (requestType.find("POST") != std::string::npos) {
                         if (requestType.find("/on-fragment-received") != std::string::npos) {
                            //Parse to get the byte size and time diff 
-                           std::string uuid, size_str, start_str, end_str;
-
-                           // 1. Process headers line-by-line using a stream wrapper
-                           std::istringstream stream(headers);
-                           std::string line;
-                           
-                           // Skip the initial POST / request status line
-                           std::getline(stream, line); 
-
-                           while (std::getline(stream, line) && line != "\r") {
-                              // Strip trailing carriage return if present
-                              if (!line.empty() && line.back() == '\r') {
-                                 line.pop_back();
-                              }
-
-                              size_t colon = line.find(':');
-                              if (colon == std::string::npos) continue;
-
-                              // Extract key and lowercase it for reliable comparison
-                              std::string key = line.substr(0, colon);
-                              std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-
-                              // Extract raw value and trim leading space safely
-                              std::string value = line.substr(colon + 1);
-                              size_t first_char = value.find_first_not_of(" \t");
-                              if (first_char != std::string::npos) {
-                                 value = value.substr(first_char);
-                              }
-
-                              // Map keys directly to your target variables
-                              if (key == "x-489-uuid"){
-                                 uuid = value;
-                              }
-                              else if (key == "x-fragment-size"){
-                                 size_str = value;
-                              }
-                              else if (key == "x-timestamp-start"){
-                                 start_str = value;
-                              }
-                              else if (key == "x-timestamp-end"){
-                                 end_str = value;
-                              }
-                           }
-
-                           // 2. Perform conversions and update throughput metrics
                            if (!uuid.empty() && !size_str.empty() && !start_str.empty() && !end_str.empty()) {
-                              try {
-                                    long long elapsedMs = std::stoll(end_str) - std::stoll(start_str);
-                                    if (elapsedMs > 0) {
-                                       double tNew = (std::stod(size_str) * 8.0) / elapsedMs;
-                                       double &tCur = throughputs[uuid]; // Ensure alpha and throughputs are visible globally
-                                       tCur = alpha * tNew + (1.0 - alpha) * tCur;
-                                    }
-                              } catch (const std::exception &e) {
-                                    std::cerr << "Header value conversion failed: " << e.what() << std::endl;
+                              long long elapsedMs = std::stoll(end_str) - std::stoll(start_str);
+                              if (elapsedMs > 0) {
+                                 double tNew = (std::stod(size_str) * 8.0) / elapsedMs;
+                                 double &tCur = throughputs[uuid];
+                                 tCur = alpha * tNew + (1.0 - alpha) * tCur;
+                                 spdlog::info("Client {} finished receiving a segment of size {} bytes in {} ms. Throughput: {} Kbps. Avg Throughput: {} Kbps", uuid, size_str, std::to_string(elapsedMs), int(tNew), int(tCur)); 
                               }
                            }
                            state.readBuffer.append("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
@@ -496,7 +453,7 @@ void handle_client_activity(fd_set &readfds, double alpha){
             if (bytes_received > 0) {
                int client_fd = connectionStatus[sockfd].connectedTo;
                
-               // Loop to ensure all received bytes are fully sent (handling partial writes)
+               // Loop to ensure all received bytes are fully sent
                size_t total_sent = 0;
                while (total_sent < static_cast<size_t>(bytes_received)) {
                   ssize_t bytes_sent = send(client_fd, buffer + total_sent, bytes_received - total_sent, 0);

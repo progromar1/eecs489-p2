@@ -114,6 +114,15 @@ std::string parse_request_line(const std::string &line){
    return target;
 }
 
+std::string extractChunkname(const std::string& line){
+   std::istringstream iss(line);
+   std::string target, filler;
+   iss >> filler >> target;
+   return target;
+}
+
+
+
 int send_data(int sockfd, std::string_view bytes) {
     size_t sent = 0;
     do {

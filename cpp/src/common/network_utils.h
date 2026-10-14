@@ -52,6 +52,7 @@ std::string get_first_line(const std::string& request);
 size_t extract_content_length(const std::string& headers);
 
 std::string parse_request_line(const std::string &line);
+std::string extractChunkname(const std::string& line);
 
 std::string get_IP(int sockfd);
 
