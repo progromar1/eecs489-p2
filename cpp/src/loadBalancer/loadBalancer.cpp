@@ -24,20 +24,18 @@ const int INF = std::numeric_limits<int>::max();
 
 int listenFD;
 
-// Round-robin: server list (addr in network order, port in host order).
 static std::vector<in_addr_t> rrAddrs;
 static std::vector<uint16_t> rrPorts;
 static size_t rrNext = 0;
  
-// Geo: per-node info plus the all-pairs shortest path matrix.
 enum NodeType { 
    CLIENT, 
    SWITCH, 
    SERVER 
 };
 static std::vector<NodeType> nodeTypes;
-static std::vector<in_addr_t> nodeAddrs;  // 0 for NO_IP nodes
-static std::vector<std::vector<long long>> dist;
+static std::vector<in_addr_t> nodeAddrs; 
+static std::vector<std::vector<int>> distanceMatrix;
 
 static std::string addrToString(in_addr_t addr) {
     char buf[INET_ADDRSTRLEN] = {0};
@@ -74,7 +72,7 @@ static bool loadGeo(const std::string &path) {
    for (int i = 0; i < numNodes; i++) {
       std::string type, ip;
       if (!(f >> type)) return false;
-      // Tolerate an optional leading host id ("<id> TYPE IP").
+      
       if (std::isdigit(static_cast<unsigned char>(type[0])) && !(f >> type))
          return false;
       if (!(f >> ip)) return false;
@@ -92,30 +90,39 @@ static bool loadGeo(const std::string &path) {
 
    if (!(f >> key >> numLinks) || key != "NUM_LINKS:") return false;
 
-   dist.assign(numNodes, std::vector<long long>(numNodes, INF));
-   for (int i = 0; i < numNodes; i++) dist[i][i] = 0;
+   distanceMatrix.assign(numNodes, std::vector<int>(numNodes, INF));
 
+   //Floyd Warshall init
+   for (int i = 0; i < numNodes; i++){
+      distanceMatrix[i][i] = 0;
+   }
    for (int i = 0; i < numLinks; i++) {
-      int u, v;
-      long long c;
-      if (!(f >> u >> v >> c)) return false;
-      if (u < 0 || v < 0 || u >= numNodes || v >= numNodes) return false;
-      if (c < dist[u][v]) {
-         dist[u][v] = c;
-         dist[v][u] = c;
+      int node1, node2, weight;
+      f >> node1 >> node2 >> weight;
+      if (node1 < 0 || node2 < 0 || node1 >= numNodes || node2 >= numNodes){
+         return false;
+      }
+      if (weight < distanceMatrix[node1][node2]) {
+         distanceMatrix[node1][node2] = weight;
+         distanceMatrix[node2][node1] = weight;
       }
    }
 
-   // Floyd-Warshall, computed once at startup.
-   for (int k = 0; k < numNodes; k++)
+   //Floyd Warshall actual algo
+   for (int intermediateNode = 0; intermediateNode < numNodes; intermediateNode++){
       for (int i = 0; i < numNodes; i++) {
-         if (dist[i][k] >= INF) continue;
+         if (distanceMatrix[i][intermediateNode] >= INF){
+            continue;
+         }
          for (int j = 0; j < numNodes; j++) {
-               if (dist[k][j] >= INF) continue;
-               if (dist[i][k] + dist[k][j] < dist[i][j])
-                  dist[i][j] = dist[i][k] + dist[k][j];
+               if (distanceMatrix[intermediateNode][j] >= INF){
+                  continue;
+               }
+               if (distanceMatrix[i][intermediateNode] + distanceMatrix[intermediateNode][j] < distanceMatrix[i][j])
+                  distanceMatrix[i][j] = distanceMatrix[i][intermediateNode] + distanceMatrix[intermediateNode][j];
          }
       }
+   }
    return true;
 }
  
@@ -132,22 +139,24 @@ static bool pickGeo(in_addr_t clientAddr, in_addr_t &addr, uint16_t &port) {
    int clientId = -1;
    for (size_t i = 0; i < nodeTypes.size(); i++) {
       if (nodeTypes[i] == CLIENT && nodeAddrs[i] == clientAddr) {
-         clientId = static_cast<int>(i);
+         clientId = int(i);
          break;
       }
    }
    if (clientId < 0) return false;
 
-   long long best = INF;
+   int best = INF;
    int bestId = -1;
-   // Strict '<' over ascending ids keeps the lowest id on ties.
+   
    for (size_t i = 0; i < nodeTypes.size(); i++) {
-      if (nodeTypes[i] == SERVER && dist[clientId][i] < best) {
-         best = dist[clientId][i];
-         bestId = static_cast<int>(i);
+      if (nodeTypes[i] == SERVER && distanceMatrix[clientId][i] < best) {
+         best = distanceMatrix[clientId][i];
+         bestId = int(i);
       }
    }
-   if (bestId < 0) return false;
+   if (bestId < 0){
+      return false;
+   }
 
    addr = nodeAddrs[bestId];
    port = VID_SERVER_PORT;
@@ -181,10 +190,16 @@ static void handleClient(int fd, bool rr) {
    uint16_t port = 0;
 
    if (rr){
-      pickRoundRobin(addr, port);
+      if (!pickRoundRobin(addr, port)){
+         spdlog::info("Failed to fulfill request ID {}", requestId);
+         close(fd);
+      }
    }
    else{
-      pickGeo(req.client_addr, addr, port);
+      if (!pickGeo(req.client_addr, addr, port)){
+         spdlog::info("Failed to fulfill request ID {}", requestId);
+         close(fd);
+      }
    }
 
    LoadBalancerResponse resp;
@@ -298,6 +313,12 @@ int main(int argc, char *argv[]) {
    }
    if (geo == rr) { 
       std::perror("Invalid selection of load balancing method (Both on or None on)");
+      return 1;
+   }
+
+   bool loaded = rr ? loadRoundRobin(serversPath) : loadGeo(serversPath);
+   if (!loaded) {
+      std::cerr << "Failed to load " << serversPath << "\n";
       return 1;
    }
 
