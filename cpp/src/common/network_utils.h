@@ -7,6 +7,7 @@
 #include <string_view>
 #include <string>
 #include <sstream>
+#include <algorithm>
 
 const unsigned int MAX_MESSAGE_SIZE = 255; 
 

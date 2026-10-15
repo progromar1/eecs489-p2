@@ -329,7 +329,6 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
-   std::cout << geo << " " << rr << std::endl;
    if (rr){
       loadRoundRobin(serversPath);
    }

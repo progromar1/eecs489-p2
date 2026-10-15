@@ -382,7 +382,6 @@ void handle_client_activity(fd_set &readfds, double alpha){
                      std::getline(stream, line); 
 
                      while (std::getline(stream, line) && line != "\r") {
-                        // Strip trailing carriage return if present
                         if (!line.empty() && line.back() == '\r') {
                            line.pop_back();
                         }
@@ -422,7 +421,7 @@ void handle_client_activity(fd_set &readfds, double alpha){
                            std::string vidPath = parse_request_line(requestType);
                            spdlog::info("Manifest requested by {} forwarded to {}:{} for {}", uuid, get_IP(state.connectedTo), get_port_number(state.connectedTo), extractChunkname(requestType)); 
 
-                           // First-ever request for this video, fetch vid.mpd for the proxy's own use
+                           // First request for this video, get vid.mpd for the proxy's own use
                            if (availBitrates.find(vidPath) == availBitrates.end()) {
                               send(state.connectedTo, state.readBuffer.data(), state.readBuffer.size(), 0);
 
