@@ -38,57 +38,72 @@ static std::vector<in_addr_t> nodeAddrs;
 static std::vector<std::vector<int>> distanceMatrix;
 
 static std::string addrToString(in_addr_t addr) {
-    char buf[INET_ADDRSTRLEN] = {0};
-    in_addr in{};
-    in.s_addr = addr;
-    inet_ntop(AF_INET, &in, buf, sizeof(buf));
-    return buf;
+   char buf[INET_ADDRSTRLEN] = {0};
+   in_addr in{};
+   in.s_addr = addr;
+   inet_ntop(AF_INET, &in, buf, sizeof(buf));
+   return buf;
 }
  
 static bool loadRoundRobin(const std::string &path) {
-    std::ifstream f(path);
-    std::string key;
-    int n;
-    if (!f || !(f >> key >> n) || key != "NUM_SERVERS:") return false;
- 
-    for (int i = 0; i < n; i++) {
-        std::string ip;
-        int port;
-        in_addr in{};
-        if (!(f >> ip >> port) || inet_pton(AF_INET, ip.c_str(), &in) != 1)
-            return false;
-        rrAddrs.push_back(in.s_addr);
-        rrPorts.push_back(static_cast<uint16_t>(port));
-    }
-    return !rrAddrs.empty();
+   std::ifstream f(path);
+   std::string key;
+   int n;
+
+   f >> key >> n;
+
+   for (int i = 0; i < n; i++) {
+      std::string ip;
+      int port;
+      in_addr in{};
+      f >> ip >> port;
+      if (inet_pton(AF_INET, ip.c_str(), &in) != 1){
+         return false;
+      }
+      rrAddrs.push_back(in.s_addr);
+      rrPorts.push_back(static_cast<uint16_t>(port));
+   }
+   return !rrAddrs.empty();
 }
  
 static bool loadGeo(const std::string &path) {
    std::ifstream f(path);
    std::string key;
    int numNodes, numLinks;
-   if (!f || !(f >> key >> numNodes) || key != "NUM_NODES:") return false;
-
+   if (!f){
+      return false;
+   }
+   f >> key >> numNodes;
    for (int i = 0; i < numNodes; i++) {
       std::string type, ip;
-      if (!(f >> type)) return false;
-      
-      if (std::isdigit(static_cast<unsigned char>(type[0])) && !(f >> type))
-         return false;
-      if (!(f >> ip)) return false;
+      f >> type >> ip;
 
-      if (type == "CLIENT") nodeTypes.push_back(CLIENT);
-      else if (type == "SWITCH") nodeTypes.push_back(SWITCH);
-      else if (type == "SERVER") nodeTypes.push_back(SERVER);
-      else return false;
+      std::cout << type << " " << ip << std::endl;
+
+      if (type == "CLIENT"){
+         nodeTypes.push_back(CLIENT);
+      }
+      else if (type == "SWITCH"){
+         nodeTypes.push_back(SWITCH);
+      }
+      else if (type == "SERVER"){
+         nodeTypes.push_back(SERVER);
+      }
+      else{
+         return false;
+      }
 
       in_addr in{};
-      if (ip == "NO_IP") in.s_addr = 0;
-      else if (inet_pton(AF_INET, ip.c_str(), &in) != 1) return false;
+      if (ip == "NO_IP"){
+         in.s_addr = 0;
+      }
+      else if(inet_pton(AF_INET, ip.c_str(), &in) != 1){
+         return false;
+      }
       nodeAddrs.push_back(in.s_addr);
    }
 
-   if (!(f >> key >> numLinks) || key != "NUM_LINKS:") return false;
+   f >> key >> numLinks;
 
    distanceMatrix.assign(numNodes, std::vector<int>(numNodes, INF));
 
@@ -163,17 +178,6 @@ static bool pickGeo(in_addr_t clientAddr, in_addr_t &addr, uint16_t &port) {
    return true;
 }
  
-static bool sendFull(int fd, const void *buf, size_t n) {
-    const char *p = static_cast<const char *>(buf);
-    size_t sent = 0;
-    while (sent < n) {
-        ssize_t r = send(fd, p + sent, n - sent, 0);
-        if (r <= 0) return false;
-        sent += static_cast<size_t>(r);
-    }
-    return true;
-}
- 
 static void handleClient(int fd, bool rr) {
    LoadBalancerRequest req;
    std::memset(&req, 0, sizeof(req));
@@ -208,15 +212,24 @@ static void handleClient(int fd, bool rr) {
    resp.videoserver_port = htons(port);
    resp.request_id = htons(requestId);
 
-   if (sendFull(fd, &resp, sizeof(resp))) {
-      spdlog::info("Responded to request ID {} with server {}:{}", requestId, addrToString(addr), port);
+   const char* p = reinterpret_cast<const char*>(&resp);
+
+   int totalBytes = sizeof(resp);
+   int sent = 0;
+   while (sent < totalBytes) {
+      int bs = send(fd, p + sent, totalBytes - sent, 0);
+      if (bs <= 0){
+         return;
+      }
+      sent += bs;
    }
+   spdlog::info("Responded to request ID {} with server {}:{}", requestId, addrToString(addr), port);
+   
    close(fd);
 }
 
 void init_listen_socket(const char* listenPort){
    struct addrinfo hints, *res;
-   const char *proxyIP = "0.0.1.0";
    int yes = 1;
 
    //Setting up the server socket
@@ -316,10 +329,12 @@ int main(int argc, char *argv[]) {
       return 1;
    }
 
-   bool loaded = rr ? loadRoundRobin(serversPath) : loadGeo(serversPath);
-   if (!loaded) {
-      std::cerr << "Failed to load " << serversPath << "\n";
-      return 1;
+   std::cout << geo << " " << rr << std::endl;
+   if (rr){
+      loadRoundRobin(serversPath);
+   }
+   if (geo){
+      loadGeo(serversPath);
    }
 
    //Establishing lb socket
