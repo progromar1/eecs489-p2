@@ -10,6 +10,9 @@
 #include "../common/network_utils.h"
 #include <pugixml.hpp>
 #include <algorithm>
+#include <random>
+#include <arpa/inet.h>
+#include "../common/LoadBalancerProtocol.h"
 
 #define BACKLOG 10
 #define MAX_MESSAGE_SIZE 1024
@@ -33,15 +36,17 @@ std::unordered_map<int, int> msg_counts; //Holds all socketFDs from browser clie
 std::unordered_map<std::string, std::vector<int>> availBitrates;
 std::unordered_map<int, connectionState> connectionStatus;
 std::unordered_map<std::string, double> throughputs;
-int sockServerFD;
+int listenFD;
 bool flag;
+bool balance = false;
 
 int main(int argc, char* argv[]){
    cxxopts::Options options("miProxy");
    options.add_options()
-      ("h,hostname", "Video server IP", cxxopts::value<std::string>())
-      ("p,port", "Vid Server port number", cxxopts::value<int>())
+      ("h,hostname", "Video server IP / Load balancing IP address if balance flag is set", cxxopts::value<std::string>())
+      ("p,port", "Vid Server port number / Load balancer port if balance flag is set", cxxopts::value<int>())
       ("l,listen-port", "Proxy port number", cxxopts::value<int>())
+      ("b,balance", "Use load balancing")
       ("a,alpha", "Coefficient in EW<A throughput estimate", cxxopts::value<double>());
 
    cxxopts::ParseResult result;
@@ -67,10 +72,14 @@ int main(int argc, char* argv[]){
       return 1; 
    }
 
+   if (result.count("balance") > 0){
+      balance = true;
+   }
+
    double alpha = result["alpha"].as<double>();
    int vsPort = result["port"].as<int>();
    int proxyPort = result["listen-port"].as<int>();
-   std::string vidServerHost = result["hostname"].as<std::string>();
+   std::string vidServer_LB_Host = result["hostname"].as<std::string>();
 
    if (vsPort < 1024 || vsPort > 65535) {
       std::cerr << "Error: port number must be in the range of [1024, 65535]";
@@ -88,9 +97,9 @@ int main(int argc, char* argv[]){
    }
 
    std::string validProxyPort = (std::to_string(proxyPort));
-   std::string vidServerPort = (std::to_string(vsPort));
+   std::string vidServer_LB_Port = (std::to_string(vsPort));
    init_listen_socket(validProxyPort.c_str());
-   run(vidServerPort.c_str(), vidServerHost.c_str(), alpha);
+   run(vidServer_LB_Port.c_str(), vidServer_LB_Host.c_str(), alpha);
 
    return 0;
 
@@ -104,7 +113,7 @@ void run(const char* vidServerPort, const char* vidServerHost, double alpha){
       FD_ZERO(&readfds);
 
       // Add the listening socket to the set.
-      FD_SET(sockServerFD, &readfds);
+      FD_SET(listenFD, &readfds);
 
       // Add client sockets to the set.
       for (const auto &entry : msg_counts) {
@@ -125,7 +134,7 @@ void run(const char* vidServerPort, const char* vidServerHost, double alpha){
 
       // since FD set contains the client sockets AND the listening socket, if this socket has activity and selected
       //    it means that the listening socket detects a new connection and thus you call accept_browser_clients()
-      if (FD_ISSET(sockServerFD, &readfds)) {
+      if (FD_ISSET(listenFD, &readfds)) {
          browserConnectionFD = accept_browser_clients();
          if (browserConnectionFD < 0){
             std::perror("Error when connecting with browser client");
@@ -142,7 +151,6 @@ void run(const char* vidServerPort, const char* vidServerHost, double alpha){
 
 void init_listen_socket(const char* listenPort){
    struct addrinfo hints, *res;
-   const char *proxyIP = "0.0.1.0";
    int yes = 1;
 
    //Setting up the server socket
@@ -161,9 +169,9 @@ void init_listen_socket(const char* listenPort){
       when a client connects, accept() returns a new socket with a different file descripter which is used
       for the actual communication with that client
    */
-   sockServerFD = socket(res->ai_family, res->ai_socktype, res->ai_protocol); 
+   listenFD = socket(res->ai_family, res->ai_socktype, res->ai_protocol); 
    
-   if (sockServerFD < 0){
+   if (listenFD < 0){
       std::perror("Error creating server socket: ");
       std::exit(1);
    }
@@ -171,12 +179,12 @@ void init_listen_socket(const char* listenPort){
    This prevents the address already in use error message and allows the program to reuse the port
    yes = 1 is enabling this
    */
-   if (setsockopt(sockServerFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) < 0) {
+   if (setsockopt(listenFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
       std::perror("setsockopt");
       std::exit(1);
    }
 
-   if (bind(sockServerFD, res->ai_addr,res->ai_addrlen) < 0){
+   if (bind(listenFD, res->ai_addr,res->ai_addrlen) < 0){
       std::perror("Bind Failed: "); // Using perror since bind sets errno if there is a failure
       std::exit(1);
    }
@@ -184,7 +192,7 @@ void init_listen_socket(const char* listenPort){
    // Once we have bounded to a port we no longer need the addrinfo and can deallocate memory
    freeaddrinfo(res);
 
-   if (listen(sockServerFD, BACKLOG) == -1){
+   if (listen(listenFD, BACKLOG) == -1){
       std::perror("Listen Failed: ");
       std::exit(1);
    }
@@ -193,13 +201,66 @@ void init_listen_socket(const char* listenPort){
 
 }
 
+void queryLb(const char* lbHost, const char* lbPort, int browserFD, std::string& vidHost, std::string& vidPort) {
+   sockaddr_in peer{};
+   socklen_t peerLen = sizeof(peer);
+   if (getpeername(browserFD, reinterpret_cast<sockaddr*>(&peer), &peerLen) < 0) {
+      std::perror("getpeername");
+      return;
+   }
+
+   addrinfo hints, *res;
+   hints = {};
+   hints.ai_family = AF_INET;
+   hints.ai_socktype = SOCK_STREAM;
+   getaddrinfo(lbHost, lbPort, &hints, &res);
+
+   int lbFD = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+
+   if (connect(lbFD, res->ai_addr, res->ai_addrlen) < 0) {
+      std::perror("Load balancer connection failed");
+      return;
+   }
+
+   freeaddrinfo(res);
+
+   static std::mt19937 rng(std::random_device{}());
+   uint16_t requestId = static_cast<uint16_t>(rng());
+
+   LoadBalancerRequest req = {};
+   req.client_addr = peer.sin_addr.s_addr;
+   req.request_id = htons(requestId);
+
+   LoadBalancerResponse resp = {};
+   int bytes_sent = send(lbFD, &req, sizeof(req), 0);
+   if (bytes_sent < 0) {
+      std::perror("Send to load balancer failed: ");
+      return;
+   }
+   
+   int bytes_recevied = recv(lbFD, &resp, sizeof(resp), MSG_WAITALL);
+   if (bytes_recevied < 0) {
+      std::perror("Receive from load balancer failed: ");
+      return;
+   }
+
+   close(lbFD);
+
+   char buf[16];
+   in_addr in{};
+   in.s_addr = resp.videoserver_addr;
+   inet_ntop(AF_INET, &in, buf, sizeof(buf));
+   vidHost = buf;
+   vidPort = std::to_string(ntohs(resp.videoserver_port));
+}
+
 int accept_browser_clients(){
    sockaddr_in their_addr;
    socklen_t addr_size = sizeof(their_addr);
    std::string client_ip;
    int client_port;
 
-   int browserConnectionFD = accept(sockServerFD, (struct sockaddr *)&their_addr, &addr_size);
+   int browserConnectionFD = accept(listenFD, (struct sockaddr *)&their_addr, &addr_size);
    if (browserConnectionFD < 0){
       std::perror("Accept Failed: ");
       return -1;
@@ -220,14 +281,21 @@ void connect_to_videoserver(const char* vidServerPort, const char* validServerHo
    struct sockaddr_in vidServerAddr;
    struct addrinfo hints, *res;
    int clientProxyFD;
+   std::string lbHost, lbPort;
 
-   memset(&hints, 0, sizeof hints);
+   memset(&hints, 0, sizeof(hints));
    hints.ai_family = AF_UNSPEC;
    hints.ai_socktype = SOCK_STREAM;
 
-   getaddrinfo(validServerHost, vidServerPort, &hints, &res);
-
-   clientProxyFD = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+   if (balance){
+      queryLb(validServerHost, vidServerPort, browserConnectionFD, lbHost, lbPort);
+      getaddrinfo(lbHost.c_str(), lbPort.c_str(), &hints, &res);
+      clientProxyFD = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+   }
+   else{
+      getaddrinfo(validServerHost, vidServerPort, &hints, &res);
+      clientProxyFD = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+   }
    
    if(connect(clientProxyFD, res->ai_addr, res->ai_addrlen) < 0){
       std::perror("Connection Failed: ");
@@ -264,9 +332,10 @@ void handle_client_activity(fd_set &readfds, double alpha){
                close(serverFD); //closing the proxy side socket for the vid server
                connectionStatus.erase(serverFD);
                connectionStatus.erase(sockfd);
-               it = msg_counts.erase(it);
-               msg_counts.erase(serverFD);
+               it = msg_counts.erase(it); //possible source of errors
+               msg_counts.erase(serverFD); //Possible source of errors
                spdlog::info("Client socket sockfd {} disconnected", sockfd); 
+               return;
             }
             else if (bytes_received < 0){
                std::perror("Receive failed: ");
@@ -399,7 +468,7 @@ void handle_client_activity(fd_set &readfds, double alpha){
                               int lowestBitRate = *(std::min_element(availBitrates[vidPath].begin(),availBitrates[vidPath].end()));
                               int goingBitRate = lowestBitRate;
                               for (int bitRate : availBitrates[vidPath]){
-                                 if (minThroughput > bitRate){
+                                 if (minThroughput >= bitRate){
                                     goingBitRate = bitRate;
                                  }
                               }
@@ -431,13 +500,18 @@ void handle_client_activity(fd_set &readfds, double alpha){
                            }
                            state.readBuffer.append("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
                            send(sockfd, state.readBuffer.data(), state.readBuffer.size(), 0);
+                           state.readBuffer.clear();
+                           state.head_parsed = false;
                            return;
                         }
                      }
                      size_t sent = 0;
                      while (sent < state.readBuffer.size()){
                         ssize_t n = send(state.connectedTo, state.readBuffer.data() + sent, state.readBuffer.size() - sent, 0);
-                        if (n < 0) { std::perror("send to server"); break; }
+                        if (n < 0) { 
+                           std::perror("send to server"); 
+                           break; 
+                        }
                         sent += n;
                      }
                      state.readBuffer.clear();
