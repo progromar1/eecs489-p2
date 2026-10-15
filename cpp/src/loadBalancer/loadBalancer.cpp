@@ -24,19 +24,17 @@ const int INF = std::numeric_limits<int>::max();
 
 int listenFD;
 
-// Round-robin: server list (addr in network order, port in host order).
 static std::vector<in_addr_t> rrAddrs;
 static std::vector<uint16_t> rrPorts;
 static size_t rrNext = 0;
  
-// Geo: per-node info plus the all-pairs shortest path matrix.
 enum NodeType { 
    CLIENT, 
    SWITCH, 
    SERVER 
 };
 static std::vector<NodeType> nodeTypes;
-static std::vector<in_addr_t> nodeAddrs;  // 0 for NO_IP nodes
+static std::vector<in_addr_t> nodeAddrs; 
 static std::vector<std::vector<long long>> dist;
 
 static std::string addrToString(in_addr_t addr) {
@@ -299,6 +297,13 @@ int main(int argc, char *argv[]) {
    if (geo == rr) { 
       std::perror("Invalid selection of load balancing method (Both on or None on)");
       return 1;
+   }
+
+   if (rr){
+      loadRoundRobin(serversPath);
+   }
+   if (geo){
+      loadGeo(serversPath);
    }
 
    //Establishing lb socket
